@@ -40,8 +40,20 @@ fn get_auto_launch() -> Result<AutoLaunch, AppError> {
     Ok(auto_launch)
 }
 
+fn auto_launch_allowed_for_mode(portable_mode: bool) -> bool {
+    !portable_mode
+}
+
+fn portable_auto_launch_error() -> AppError {
+    AppError::Message("Portable 版本不支持开机自启".to_string())
+}
+
 /// 启用开机自启
 pub fn enable_auto_launch() -> Result<(), AppError> {
+    if !auto_launch_allowed_for_mode(crate::config::is_portable_mode()) {
+        return Err(portable_auto_launch_error());
+    }
+
     let auto_launch = get_auto_launch()?;
     auto_launch
         .enable()
@@ -52,6 +64,10 @@ pub fn enable_auto_launch() -> Result<(), AppError> {
 
 /// 禁用开机自启
 pub fn disable_auto_launch() -> Result<(), AppError> {
+    if !auto_launch_allowed_for_mode(crate::config::is_portable_mode()) {
+        return Err(portable_auto_launch_error());
+    }
+
     let auto_launch = get_auto_launch()?;
     auto_launch
         .disable()
@@ -62,6 +78,10 @@ pub fn disable_auto_launch() -> Result<(), AppError> {
 
 /// 检查是否已启用开机自启
 pub fn is_auto_launch_enabled() -> Result<bool, AppError> {
+    if !auto_launch_allowed_for_mode(crate::config::is_portable_mode()) {
+        return Ok(false);
+    }
+
     let auto_launch = get_auto_launch()?;
     auto_launch
         .is_enabled()
@@ -72,6 +92,12 @@ pub fn is_auto_launch_enabled() -> Result<bool, AppError> {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    #[test]
+    fn auto_launch_is_allowed_only_for_non_portable_mode() {
+        assert!(!auto_launch_allowed_for_mode(true));
+        assert!(auto_launch_allowed_for_mode(false));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

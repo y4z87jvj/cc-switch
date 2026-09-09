@@ -341,10 +341,18 @@ fn macos_tray_icon() -> Option<Image<'static>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.cc-switch/crash.log）
+    // Portable 模式必须在任何 Tauri/WebView 初始化前固定运行时目录，避免
+    // 启动早期的崩溃日志或浏览器缓存落到用户盘符。
+    crate::config::configure_portable_runtime();
+    if crate::config::is_portable_mode() {
+        panic_hook::init_app_config_dir(crate::config::get_app_config_dir());
+    }
+
+    // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log
     panic_hook::setup_panic_hook();
 
     let mut builder = tauri::Builder::default();
+    let portable_mode = crate::config::is_portable_mode();
 
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
@@ -403,7 +411,7 @@ pub fn run() {
         });
     }
 
-    let builder = builder
+    let mut builder = builder
         // 注册 deep-link 插件（处理 macOS AppleEvent 和其他平台的深链接）
         .plugin(tauri_plugin_deep_link::init())
         // 拦截窗口关闭：根据设置决定是否最小化到托盘
@@ -440,14 +448,44 @@ pub fn run() {
         })
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_store::Builder::new().build())
-        .plugin(
-            tauri_plugin_window_state::Builder::default()
-                .with_state_flags(window_state_flags())
-                .build(),
-        )
+        .plugin(tauri_plugin_opener::init());
+
+    if !portable_mode {
+        builder = builder
+            .plugin(tauri_plugin_store::Builder::new().build())
+            .plugin(
+                tauri_plugin_window_state::Builder::default()
+                    .with_state_flags(window_state_flags())
+                    .build(),
+            );
+    }
+
+    let builder = builder
         .setup(|app| {
+            #[cfg(target_os = "windows")]
+            if crate::config::is_portable_mode()
+                && app.get_webview_window("main").is_none()
+            {
+                // Windows declares the main window with `create: false` so
+                // Portable can provide an executable-relative WebView2 data
+                // directory before WebView2 is initialized. Non-Portable
+                // Windows windows retain the same declarative configuration.
+                let main_window_config = app
+                    .config()
+                    .app
+                    .windows
+                    .iter()
+                    .find(|window| window.label == "main")
+                    .cloned()
+                    .expect("main window configuration is required");
+                let mut main_window_builder =
+                    tauri::WebviewWindowBuilder::from_config(app.handle(), &main_window_config)?;
+                if let Some(webview_dir) = crate::config::portable_webview_dir() {
+                    main_window_builder = main_window_builder.data_directory(webview_dir);
+                }
+                main_window_builder.build()?;
+            }
+
             let _ = rustls::crypto::ring::default_provider().install_default();
 
             // 预先刷新 Store 覆盖配置，确保后续路径读取正确（日志/数据库等）
@@ -505,12 +543,14 @@ pub fn run() {
             // 注册 Updater 插件（桌面端）；放在 logger 之后，确保失败可诊断。
             #[cfg(desktop)]
             {
-                if let Err(e) = app
-                    .handle()
-                    .plugin(tauri_plugin_updater::Builder::new().build())
-                {
-                    // 若配置不完整（如缺少 pubkey），跳过 Updater 而不中断应用
-                    log::warn!("初始化 Updater 插件失败，已跳过：{e}");
+                if !crate::config::is_portable_mode() {
+                    if let Err(e) = app
+                        .handle()
+                        .plugin(tauri_plugin_updater::Builder::new().build())
+                    {
+                        // 若配置不完整（如缺少 pubkey），跳过 Updater 而不中断应用
+                        log::warn!("初始化 Updater 插件失败，已跳过：{e}");
+                    }
                 }
             }
 
@@ -1040,10 +1080,14 @@ pub fn run() {
 
                 #[cfg(all(debug_assertions, windows))]
                 {
-                    if let Err(e) = app.deep_link().register_all() {
-                        log::error!("✗ Failed to register deep link schemes: {}", e);
+                    if !crate::config::is_portable_mode() {
+                        if let Err(e) = app.deep_link().register_all() {
+                            log::error!("✗ Failed to register deep link schemes: {}", e);
+                        } else {
+                            log::info!("✓ Deep link schemes registered (Windows debug)");
+                        }
                     } else {
-                        log::info!("✓ Deep link schemes registered (Windows debug)");
+                        log::info!("⊘ Portable mode: skipping Windows deep-link registration");
                     }
                 }
             }
@@ -2245,6 +2289,10 @@ fn window_state_flags() -> StateFlags {
 /// 当前应用的退出路径会拦截 `ExitRequested` 并最终直接 `std::process::exit(0)`，
 /// 这里需要在真正结束进程前手动落盘，避免 window-state 插件的默认退出钩子被绕过。
 pub fn save_window_state_before_exit(app_handle: &tauri::AppHandle) {
+    if crate::config::is_portable_mode() {
+        return;
+    }
+
     if let Err(err) = app_handle.save_window_state(window_state_flags()) {
         log::error!("退出前保存窗口状态失败: {err}");
     } else {

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
 use crate::app_config::AppType;
@@ -340,7 +340,8 @@ pub struct CodexOfficialHistoryUnifyMigration {
 
 /// 应用设置结构
 ///
-/// 存储设备级别设置，保存在本地 `~/.cc-switch/settings.json`，不随数据库同步。
+/// 存储设备级别设置，普通安装版保存在 `~/.cc-switch/settings.json`，Portable
+/// 保存在可执行文件旁的 `.cc-switch/settings.json`，不随数据库同步。
 /// 这确保了云同步场景下多设备可以独立运作。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -574,11 +575,11 @@ impl Default for AppSettings {
 impl AppSettings {
     fn settings_path() -> Option<PathBuf> {
         // settings.json 保留用于旧版本迁移和无数据库场景
-        Some(
-            crate::config::get_home_dir()
-                .join(".cc-switch")
-                .join("settings.json"),
-        )
+        let home = crate::config::get_home_dir();
+        Some(settings_path_for(
+            crate::config::portable_dir().as_deref(),
+            &home,
+        ))
     }
 
     fn normalize_paths(&mut self) {
@@ -683,6 +684,13 @@ impl AppSettings {
             Self::default()
         }
     }
+}
+
+fn settings_path_for(portable_dir: Option<&Path>, home_dir: &Path) -> PathBuf {
+    portable_dir
+        .map(|dir| dir.join(".cc-switch"))
+        .unwrap_or_else(|| home_dir.join(".cc-switch"))
+        .join("settings.json")
 }
 
 fn save_settings_file(settings: &AppSettings) -> Result<(), AppError> {
@@ -1188,6 +1196,22 @@ pub fn update_s3_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use crate::app_config::AppType;
+    use std::path::PathBuf;
+
+    #[test]
+    fn portable_settings_path_uses_the_portable_app_directory() {
+        let home = PathBuf::from("C:/Users/tester");
+        let portable = PathBuf::from("D:/tools/cc-switch");
+
+        assert_eq!(
+            settings_path_for(Some(&portable), &home),
+            portable.join(".cc-switch/settings.json")
+        );
+        assert_eq!(
+            settings_path_for(None, &home),
+            home.join(".cc-switch/settings.json")
+        );
+    }
 
     #[test]
     fn visible_apps_old_settings_default_claude_desktop_visible() {

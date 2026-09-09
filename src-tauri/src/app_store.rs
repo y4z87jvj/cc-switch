@@ -21,12 +21,27 @@ fn update_cached_override(value: Option<PathBuf>) {
     }
 }
 
+fn store_persistence_enabled_for_mode(portable_mode: bool) -> bool {
+    !portable_mode
+}
+
+fn store_persistence_enabled() -> bool {
+    store_persistence_enabled_for_mode(crate::config::is_portable_mode())
+}
+
 /// 获取缓存中的 app_config_dir 覆盖路径
 pub fn get_app_config_dir_override() -> Option<PathBuf> {
+    if !store_persistence_enabled() {
+        return None;
+    }
     override_cache().read().ok()?.clone()
 }
 
 fn read_override_from_store(app: &tauri::AppHandle) -> Option<PathBuf> {
+    if !store_persistence_enabled() {
+        return None;
+    }
+
     let store = match app.store_builder("app_paths.json").build() {
         Ok(store) => store,
         Err(e) => {
@@ -65,6 +80,11 @@ fn read_override_from_store(app: &tauri::AppHandle) -> Option<PathBuf> {
 
 /// 从 Store 刷新 app_config_dir 覆盖值并更新缓存
 pub fn refresh_app_config_dir_override(app: &tauri::AppHandle) -> Option<PathBuf> {
+    if !store_persistence_enabled() {
+        update_cached_override(None);
+        return None;
+    }
+
     let value = read_override_from_store(app);
     update_cached_override(value.clone());
     value
@@ -75,6 +95,11 @@ pub fn set_app_config_dir_to_store(
     app: &tauri::AppHandle,
     path: Option<&str>,
 ) -> Result<(), AppError> {
+    if !store_persistence_enabled() {
+        update_cached_override(None);
+        return Ok(());
+    }
+
     let store = app
         .store_builder("app_paths.json")
         .build()
@@ -132,4 +157,15 @@ pub fn migrate_app_config_dir_from_settings(app: &tauri::AppHandle) -> Result<()
 
     let _ = refresh_app_config_dir_override(app);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn store_persistence_is_disabled_only_for_portable_mode() {
+        assert!(!store_persistence_enabled_for_mode(true));
+        assert!(store_persistence_enabled_for_mode(false));
+    }
 }

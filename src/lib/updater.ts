@@ -1,4 +1,5 @@
 import { getVersion } from "@tauri-apps/api/app";
+import { invoke } from "@tauri-apps/api/core";
 
 export type UpdateChannel = "stable" | "beta";
 
@@ -27,6 +28,16 @@ export async function checkForUpdate(
 ): Promise<
   { status: "up-to-date" } | { status: "available"; info: UpdateInfo }
 > {
+  // Portable builds intentionally do not register the updater plugin. Detect
+  // that mode before importing/calling it so startup checks stay quiet and do
+  // not attempt to write updater state to the user's profile.
+  const isPortable = await invoke<boolean>("is_portable_mode").catch(
+    () => false,
+  );
+  if (isPortable) {
+    return { status: "up-to-date" };
+  }
+
   // 动态引入，避免在未安装插件时导致打包期问题
   const { check } = await import("@tauri-apps/plugin-updater");
 

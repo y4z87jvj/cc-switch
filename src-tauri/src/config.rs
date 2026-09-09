@@ -6,6 +6,121 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::AppError;
 
+#[cfg(any(test, target_os = "windows"))]
+const PORTABLE_MARKER_FILE: &str = "portable.ini";
+#[cfg(any(test, target_os = "windows"))]
+const PORTABLE_APP_CONFIG_DIR: &str = ".cc-switch";
+#[cfg(any(test, target_os = "windows"))]
+const PORTABLE_WEBVIEW_DIR: &str = ".webview2";
+#[cfg(any(test, target_os = "windows"))]
+const PORTABLE_TEMP_DIR: &str = ".tmp";
+
+/// 根据可执行文件路径判断是否存在 Portable marker，并返回可执行文件目录。
+///
+/// 该函数只做词法路径计算和 marker 文件类型检查，不读取 marker 内容；这样
+/// Portable 版本不依赖某个特定键值，同时测试也不需要修改当前进程的路径。
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) fn portable_dir_for_exe(exe_path: &Path) -> Option<PathBuf> {
+    let dir = exe_path.parent()?;
+    dir.join(PORTABLE_MARKER_FILE)
+        .is_file()
+        .then_some(dir.to_path_buf())
+}
+
+/// 获取当前 Portable 可执行文件目录。
+#[cfg(target_os = "windows")]
+pub fn portable_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe_path| portable_dir_for_exe(&exe_path))
+}
+
+/// Portable mode is currently a Windows-only distribution contract.
+#[cfg(not(target_os = "windows"))]
+pub fn portable_dir() -> Option<PathBuf> {
+    None
+}
+
+/// 判断当前进程是否由 Portable 目录启动。
+pub fn is_portable_mode() -> bool {
+    portable_dir().is_some()
+}
+
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) fn portable_app_config_dir_for_exe(exe_path: &Path) -> Option<PathBuf> {
+    portable_dir_for_exe(exe_path).map(|dir| dir.join(PORTABLE_APP_CONFIG_DIR))
+}
+
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) fn portable_webview_dir_for_exe(exe_path: &Path) -> Option<PathBuf> {
+    portable_dir_for_exe(exe_path).map(|dir| dir.join(PORTABLE_WEBVIEW_DIR))
+}
+
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) fn portable_temp_dir_for_exe(exe_path: &Path) -> Option<PathBuf> {
+    portable_dir_for_exe(exe_path).map(|dir| dir.join(PORTABLE_TEMP_DIR))
+}
+
+#[cfg(target_os = "windows")]
+fn portable_app_config_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe_path| portable_app_config_dir_for_exe(&exe_path))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn portable_app_config_dir() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn portable_webview_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe_path| portable_webview_dir_for_exe(&exe_path))
+}
+
+#[cfg(target_os = "windows")]
+fn portable_temp_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe_path| portable_temp_dir_for_exe(&exe_path))
+}
+
+/// 在创建 Tauri WebView 前把 Windows Portable 的浏览器用户数据固定到
+/// Portable 目录。其它平台和普通安装版不改变任何环境变量。
+pub fn configure_portable_runtime() {
+    #[cfg(target_os = "windows")]
+    if let Some(webview_dir) = portable_webview_dir() {
+        // WebView2 may create the directory itself, but creating it here avoids a
+        // fallback to the default LOCALAPPDATA location when the parent exists.
+        if let Err(error) = fs::create_dir_all(&webview_dir) {
+            eprintln!(
+                "无法创建 Portable WebView2 数据目录 {}: {error}",
+                webview_dir.display()
+            );
+        }
+        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", webview_dir.as_os_str());
+    }
+
+    #[cfg(target_os = "windows")]
+    if let Some(temp_dir) = portable_temp_dir() {
+        if let Err(error) = fs::create_dir_all(&temp_dir) {
+            eprintln!(
+                "无法创建 Portable 临时目录 {}: {error}",
+                temp_dir.display()
+            );
+        }
+        // Rust, WebView2 helpers, and child processes consult these variables
+        // for transient files. Keep them local without changing HOME/LOCALAPPDATA,
+        // which intentionally remain the external CLI configuration roots.
+        let temp_path = temp_dir.as_os_str();
+        std::env::set_var("TEMP", temp_path);
+        std::env::set_var("TMP", temp_path);
+        std::env::set_var("TMPDIR", temp_path);
+    }
+}
+
 /// 获取用户主目录，带回退和日志
 ///
 /// ## Windows 注意事项
@@ -199,8 +314,15 @@ pub fn get_claude_settings_path() -> PathBuf {
     settings
 }
 
-/// 获取应用配置目录路径 (~/.cc-switch)
+/// 获取应用配置目录路径。
+///
+/// 普通安装版默认使用 `~/.cc-switch`；Windows Portable 使用可执行文件旁的
+/// `.cc-switch`，从而不在用户盘符创建 CC-Switch 自有持久化文件。
 pub fn get_app_config_dir() -> PathBuf {
+    if let Some(portable_dir) = portable_app_config_dir() {
+        return portable_dir;
+    }
+
     if let Some(custom) = crate::app_store::get_app_config_dir_override() {
         return custom;
     }
@@ -501,6 +623,50 @@ fn atomic_write_with_unix_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_dir_requires_a_regular_sibling_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("cc-switch.exe");
+
+        assert_eq!(portable_dir_for_exe(&exe), None);
+
+        std::fs::create_dir(root.path().join("portable.ini")).unwrap();
+        assert_eq!(portable_dir_for_exe(&exe), None);
+
+        std::fs::remove_dir(root.path().join("portable.ini")).unwrap();
+        std::fs::write(root.path().join("portable.ini"), b"portable=true\n").unwrap();
+        assert_eq!(portable_dir_for_exe(&exe), Some(root.path().to_path_buf()));
+    }
+
+    #[test]
+    fn portable_app_data_and_webview_paths_stay_beside_executable() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("cc-switch.exe");
+        std::fs::write(root.path().join("portable.ini"), b"portable=true\n").unwrap();
+
+        assert_eq!(
+            portable_app_config_dir_for_exe(&exe),
+            Some(root.path().join(".cc-switch"))
+        );
+        assert_eq!(
+            portable_webview_dir_for_exe(&exe),
+            Some(root.path().join(".webview2"))
+        );
+        assert_eq!(
+            portable_temp_dir_for_exe(&exe),
+            Some(root.path().join(".tmp"))
+        );
+    }
+
+    #[test]
+    fn portable_webview_path_is_absent_without_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("cc-switch.exe");
+
+        assert_eq!(portable_webview_dir_for_exe(&exe), None);
+        assert_eq!(portable_temp_dir_for_exe(&exe), None);
+    }
 
     fn assert_atomic_write_replaces_existing_file(dir: &Path) {
         let path = dir.join("atomic-write-contract.json");

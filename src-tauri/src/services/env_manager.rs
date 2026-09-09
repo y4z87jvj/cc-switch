@@ -67,8 +67,22 @@ fn create_backup(conflicts: &[EnvConflict]) -> Result<BackupInfo, String> {
 
 /// Get backup directory path
 fn get_backup_dir() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("无法获取用户主目录")?;
-    Ok(home.join(".cc-switch").join("backups"))
+    let portable_dir = crate::config::portable_dir();
+    let home_dir = dirs::home_dir();
+    backup_dir_for(portable_dir.as_deref(), home_dir.as_deref())
+}
+
+fn backup_dir_for(
+    portable_dir: Option<&std::path::Path>,
+    home_dir: Option<&std::path::Path>,
+) -> Result<PathBuf, String> {
+    if let Some(dir) = portable_dir {
+        return Ok(dir.join(".cc-switch").join("backups"));
+    }
+
+    home_dir
+        .map(|dir| dir.join(".cc-switch").join("backups"))
+        .ok_or_else(|| "无法获取用户主目录".to_string())
 }
 
 /// Delete a single environment variable
@@ -231,6 +245,21 @@ fn restore_single_env(conflict: &EnvConflict) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_environment_backups_use_the_portable_data_root() {
+        let portable = PathBuf::from("D:/tools/cc-switch");
+        let home = PathBuf::from("C:/Users/tester");
+
+        assert_eq!(
+            backup_dir_for(Some(&portable), Some(&home)).unwrap(),
+            portable.join(".cc-switch/backups")
+        );
+        assert_eq!(
+            backup_dir_for(None, Some(&home)).unwrap(),
+            home.join(".cc-switch/backups")
+        );
+    }
 
     #[test]
     fn test_backup_dir_creation() {
