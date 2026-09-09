@@ -106,10 +106,7 @@ pub fn configure_portable_runtime() {
     #[cfg(target_os = "windows")]
     if let Some(temp_dir) = portable_temp_dir() {
         if let Err(error) = fs::create_dir_all(&temp_dir) {
-            eprintln!(
-                "无法创建 Portable 临时目录 {}: {error}",
-                temp_dir.display()
-            );
+            eprintln!("无法创建 Portable 临时目录 {}: {error}", temp_dir.display());
         }
         // Rust, WebView2 helpers, and child processes consult these variables
         // for transient files. Keep them local without changing HOME/LOCALAPPDATA,
