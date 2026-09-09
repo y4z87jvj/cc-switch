@@ -1,0 +1,113 @@
+name: Manual Windows Portable
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manual-windows-portable-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portable:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup pnpm
+        shell: pwsh
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          corepack install
+          pnpm --version
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Windows executable
+        run: pnpm tauri build --no-bundle --ci --config src-tauri/tauri.portable.conf.json
+
+      - name: Create and validate Portable ZIP
+        shell: pwsh
+        env:
+          PORTABLE_VERSION: "3.20.2"
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $package = Get-Content -Raw -Path 'package.json' | ConvertFrom-Json
+          if ($package.version -ne $env:PORTABLE_VERSION) {
+            throw "package.json version $($package.version) does not match $env:PORTABLE_VERSION"
+          }
+
+          $exePath = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/target/release/cc-switch.exe'
+          if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
+            throw "Portable executable not found: $exePath"
+          }
+
+          $stageDir = Join-Path $env:RUNNER_TEMP 'cc-switch-portable-root'
+          if (Test-Path -LiteralPath $stageDir) {
+            Remove-Item -LiteralPath $stageDir -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+
+          Copy-Item -LiteralPath $exePath -Destination (Join-Path $stageDir 'cc-switch.exe')
+          @(
+            '# CC Switch portable build marker',
+            'portable=true'
+          ) | Set-Content -LiteralPath (Join-Path $stageDir 'portable.ini') -Encoding utf8
+
+          $zipPath = Join-Path $env:GITHUB_WORKSPACE 'CC-Switch-v3.20.2-Windows-Portable.zip'
+          if (Test-Path -LiteralPath $zipPath) {
+            Remove-Item -LiteralPath $zipPath -Force
+          }
+          Compress-Archive -Path (Join-Path $stageDir '*') -DestinationPath $zipPath -Force
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+          try {
+            $entries = @($archive.Entries)
+            $names = @($entries | ForEach-Object { $_.FullName })
+            $expectedNames = @('cc-switch.exe', 'portable.ini')
+            $sameNames = $names.Count -eq $expectedNames.Count -and
+              (@($expectedNames | Where-Object { $names -contains $_ }).Count -eq $expectedNames.Count)
+            if (-not $sameNames) {
+              throw "Portable ZIP must contain exactly cc-switch.exe and portable.ini at its root; found: $($names -join ', ')"
+            }
+
+            foreach ($entry in $entries) {
+              if ([string]::IsNullOrEmpty($entry.Name) -or
+                  $entry.FullName.Contains('/') -or
+                  $entry.FullName.Contains('\') -or
+                  $entry.FullName.EndsWith('.zip', [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "Portable ZIP contains a nested path or archive: $($entry.FullName)"
+              }
+            }
+          }
+          finally {
+            $archive.Dispose()
+          }
+
+          Write-Host "Validated single-level Portable ZIP: $zipPath"
+
+      # Upload the validated ZIP as-is. `archive: false` prevents Actions from
+      # wrapping it in a second download archive.
+      - name: Upload Portable ZIP
+        uses: actions/upload-artifact@v7
+        with:
+          path: CC-Switch-v3.20.2-Windows-Portable.zip
+          archive: false
+          if-no-files-found: error
